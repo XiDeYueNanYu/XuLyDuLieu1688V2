@@ -3,91 +3,91 @@ import { Utils } from '../utils.js';
 
 export const mode3 = {
     id: 'mode3',
-    name: 'MODE 3 (Tách phiên bản trong ◤ ◥)',
+    name: 'MODE 3 (Logic kiểm tra đồng nhất)',
     execute: (cleanedText, inputs) => {
-        const products = [];
-        
-        // 1. Lấy cụm "价格" dựa trên logic hàng trống (\n\n)
+        // 1. Tìm cụm 价格 và lấy giá thấp nhất từ đó (Global Min Price)
+        let globalMinPrice = Infinity;
         let globalPriceNote = "";
-        let minPriceInGlobal = Infinity;
-        
         const jgKey = "价格";
         const jgIdx = cleanedText.indexOf(jgKey);
         
         if (jgIdx !== -1) {
-            // Lấy toàn bộ văn bản từ vị trí "价格"
             const fromJg = cleanedText.substring(jgIdx);
+            const endNoteIdx = fromJg.search(/\n\s*\n/);
+            globalPriceNote = endNoteIdx !== -1 ? fromJg.substring(0, endNoteIdx).trim() : fromJg.trim();
             
-            // Tìm vị trí hàng trống đầu tiên (\n\n hoặc \r\n\r\n) để kết thúc cụm giá
-            const endOfNoteIdx = fromJg.search(/\n\s*\n/);
-            
-            if (endOfNoteIdx !== -1) {
-                globalPriceNote = fromJg.substring(0, endOfNoteIdx).trim();
-            } else {
-                // Nếu không thấy hàng trống, lấy đến khi gặp link ảnh đầu tiên
-                const firstLinkMatch = fromJg.match(/https?:\/\//);
-                globalPriceNote = firstLinkMatch ? fromJg.substring(0, firstLinkMatch.index).trim() : fromJg.trim();
-            }
-
-            // Trích xuất giá thấp nhất từ cụm globalPriceNote vừa lấy được
             const globalPrices = globalPriceNote.match(/¥\s*([\d.,]+)/g) || [];
             globalPrices.forEach(pStr => {
-                // Xử lý cả dấu phẩy (81,00) và dấu chấm (81.00)
                 const num = parseFloat(pStr.replace('¥', '').replace(/,/g, '.').trim());
-                if (!isNaN(num) && num < minPriceInGlobal) minPriceInGlobal = num;
+                if (!isNaN(num) && num < globalMinPrice) globalMinPrice = num;
             });
         }
 
-        // 2. Tách sản phẩm theo Link ảnh
+        // 2. Tách các cụm sản phẩm (dựa trên link ảnh)
         const parts = cleanedText.split(/(?=https?:\/\/)/).filter(p => p.trim() !== "");
+        const validProductsData = [];
 
+        // Bước chuẩn bị: Thu thập dữ liệu thô của từng sản phẩm hợp lệ
         parts.forEach(part => {
-            const lines = part.trim().split('\n').map(l => l.trim()).filter(l => l !== "");
-            
-            // Chỉ xử lý nếu dòng đầu là link ảnh và không phải link 1688 chi tiết
-            if (lines.length >= 2 && lines[0].startsWith('http') && !lines[0].includes('detail.1688.com')) {
-                const imgLink = lines[0];
-                const mainName = lines[1];
-                
-                // Tìm nội dung trong cặp ◤ ◥ trong toàn bộ khối text của sản phẩm
-                let bracketContent = "";
+            const lines = part.trim().split('\n').map(l => l.trim());
+            if (lines.length >= 3 && lines[0].startsWith('http') && !lines[0].includes('detail.1688.com')) {
                 const bracketMatch = part.match(/◤([\s\S]*?)◥/);
-                if (bracketMatch) {
-                    bracketContent = bracketMatch[1].trim();
-                }
+                const versionContent = bracketMatch ? bracketMatch[1].trim() : "";
+                const pricesInBracket = versionContent.match(/¥\s*([\d.,]+)/g) || [];
+                const parsedPrices = pricesInBracket.map(p => parseFloat(p.replace('¥', '').replace(/,/g, '.').trim()));
 
-                // Đếm số lượng giá tiền (dấu ¥) có trong ngoặc ◤ ◥
-                const pricesInBracket = bracketContent.match(/¥\s*([\d.,]+)/g) || [];
-                const symbolCount = pricesInBracket.length;
-                
-                let finalPrice = Infinity;
-
-                // Tính giá thấp nhất hiện có bên trong ngoặc
-                pricesInBracket.forEach(pStr => {
-                    const num = parseFloat(pStr.replace('¥', '').replace(/,/g, '.').trim());
-                    if (!isNaN(num) && num < finalPrice) finalPrice = num;
-                });
-
-                // --- LOGIC ƯU TIÊN THEO YÊU CẦU ---
-                // Nếu chỉ có 1 giá trong ◤ ◥, ưu tiên lấy giá sàn từ cụm "价格"
-                if (symbolCount === 1 && minPriceInGlobal !== Infinity) {
-                    finalPrice = minPriceInGlobal;
-                }
-
-                // Nếu sau tất cả vẫn không tìm thấy giá, dùng defaultPrice
-                if (finalPrice === Infinity) {
-                    finalPrice = inputs.defaultPrice || 0;
-                }
-
-                products.push({
-                    image: Utils.cleanImageUrl(imgLink),
-                    name: mainName,
-                    price: finalPrice,
-                    note: (globalPriceNote ? globalPriceNote + "\n---\n" : "") + (bracketContent || "Không có thông tin phiên bản")
+                validProductsData.push({
+                    img: lines[0],
+                    name: lines[1],
+                    versionContent: versionContent,
+                    prices: parsedPrices,
+                    partText: part
                 });
             }
         });
 
-        return products;
+        const productCount = validProductsData.length;
+
+        // 3. THỰC THI LOGIC ƯU TIÊN THEO YÊU CẦU
+        return validProductsData.map(prod => {
+            let finalPrice = Infinity;
+
+            if (productCount === 1) {
+                // TRƯỜNG HỢP 1 SẢN PHẨM
+                if (prod.prices.length > 1) {
+                    // Nhiều giá trong ngoặc -> lấy thấp nhất trong ngoặc
+                    finalPrice = Math.min(...prod.prices);
+                } else if (prod.prices.length === 1) {
+                    // Chỉ 1 giá trong ngoặc -> lấy thấp nhất từ cụm 价格
+                    finalPrice = globalMinPrice !== Infinity ? globalMinPrice : prod.prices[0];
+                }
+            } else if (productCount > 1) {
+                // TRƯỜNG HỢP NHIỀU SẢN PHẨM
+                // Kiểm tra xem tất cả các giá trong ◤ ◥ của mọi sản phẩm có bằng nhau không
+                const allPricesInAllProds = validProductsData.flatMap(p => p.prices);
+                const isAllPricesIdentical = allPricesInAllProds.length > 0 && 
+                                             allPricesInAllProds.every(val => val === allPricesInAllProds[0]);
+
+                if (isAllPricesIdentical) {
+                    // Nếu hoàn toàn bằng nhau -> lấy giá sàn trong cụm 价格
+                    finalPrice = globalMinPrice !== Infinity ? globalMinPrice : allPricesInAllProds[0];
+                } else {
+                    // Nếu có ít nhất 1 cặp khác nhau -> lấy giá thấp nhất trong ◤ ◥ của TỪNG sản phẩm
+                    if (prod.prices.length > 0) {
+                        finalPrice = Math.min(...prod.prices);
+                    }
+                }
+            }
+
+            // Fallback nếu không tính được giá
+            if (finalPrice === Infinity) finalPrice = inputs.defaultPrice || 0;
+
+            return {
+                image: Utils.cleanImageUrl(prod.img),
+                name: prod.name,
+                price: finalPrice,
+                note: (globalPriceNote ? globalPriceNote + "\n---\n" : "") + (prod.versionContent || "Không có thông tin phiên bản")
+            };
+        });
     }
 };
