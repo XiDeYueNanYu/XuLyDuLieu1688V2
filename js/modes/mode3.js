@@ -7,29 +7,36 @@ export const mode3 = {
     execute: (cleanedText, inputs) => {
         const products = [];
         
-        // 1. CẢI TIẾN: Lấy toàn bộ cụm "价格" cho đến khi gặp Link hoặc ký tự phân cách mạnh
+        // 1. Lấy cụm "价格" dựa trên logic hàng trống (\n\n)
         let globalPriceNote = "";
+        let minPriceInGlobal = Infinity;
+        
         const jgKey = "价格";
         const jgIdx = cleanedText.indexOf(jgKey);
+        
         if (jgIdx !== -1) {
-            // Lấy nội dung từ sau "价格:" đến trước khi bắt đầu Link ảnh (thường là bắt đầu sản phẩm)
-            const contentAfterJg = cleanedText.substring(jgIdx + jgKey.length).trim();
-            const nextProductIdx = contentAfterJg.search(/https?:\/\//);
-            globalPriceNote = nextProductIdx !== -1 ? contentAfterJg.substring(0, nextProductIdx).trim() : contentAfterJg;
-        }
-
-        // Hàm bổ trợ: Tìm giá thấp nhất trong một chuỗi (quét tất cả các ký hiệu ¥)
-        const findMinPriceInString = (text) => {
-            const priceRegex = /¥\s*([\d.,]+)/g;
-            let match;
-            let min = Infinity;
-            while ((match = priceRegex.exec(text)) !== null) {
-                // Thay thế dấu phẩy của Trung Quốc (81,00) thành dấu chấm (81.00) để parse chuẩn
-                const num = parseFloat(match[1].replace(/,/g, '.'));
-                if (!isNaN(num) && num < min) min = num;
+            // Lấy toàn bộ văn bản từ vị trí "价格"
+            const fromJg = cleanedText.substring(jgIdx);
+            
+            // Tìm vị trí hàng trống đầu tiên (\n\n hoặc \r\n\r\n) để kết thúc cụm giá
+            const endOfNoteIdx = fromJg.search(/\n\s*\n/);
+            
+            if (endOfNoteIdx !== -1) {
+                globalPriceNote = fromJg.substring(0, endOfNoteIdx).trim();
+            } else {
+                // Nếu không thấy hàng trống, lấy đến khi gặp link ảnh đầu tiên
+                const firstLinkMatch = fromJg.match(/https?:\/\//);
+                globalPriceNote = firstLinkMatch ? fromJg.substring(0, firstLinkMatch.index).trim() : fromJg.trim();
             }
-            return min;
-        };
+
+            // Trích xuất giá thấp nhất từ cụm globalPriceNote vừa lấy được
+            const globalPrices = globalPriceNote.match(/¥\s*([\d.,]+)/g) || [];
+            globalPrices.forEach(pStr => {
+                // Xử lý cả dấu phẩy (81,00) và dấu chấm (81.00)
+                const num = parseFloat(pStr.replace('¥', '').replace(/,/g, '.').trim());
+                if (!isNaN(num) && num < minPriceInGlobal) minPriceInGlobal = num;
+            });
+        }
 
         // 2. Tách sản phẩm theo Link ảnh
         const parts = cleanedText.split(/(?=https?:\/\/)/).filter(p => p.trim() !== "");
@@ -37,57 +44,46 @@ export const mode3 = {
         parts.forEach(part => {
             const lines = part.trim().split('\n').map(l => l.trim()).filter(l => l !== "");
             
-            // Bỏ qua nếu link là detail.1688.com theo logic cũ của bạn
+            // Chỉ xử lý nếu dòng đầu là link ảnh và không phải link 1688 chi tiết
             if (lines.length >= 2 && lines[0].startsWith('http') && !lines[0].includes('detail.1688.com')) {
                 const imgLink = lines[0];
                 const mainName = lines[1];
-                let dirtyPriceLine = lines[2] || ""; 
-
-                // --- Xử lý dấu hiệu ◤ ◥ ---
-                const bracketMatch = dirtyPriceLine.match(/◤([\s\S]*?)◥/);
-                let contentInBrackets = "";
-                if (bracketMatch) {
-                    contentInBrackets = bracketMatch[1].trim();
-                    dirtyPriceLine = contentInBrackets; 
-                }
-
-                // 3. Kiểm tra số lượng biến thể/mức giá trong dòng hiện tại
-                const symbolCount = (dirtyPriceLine.match(/¥/g) || []).length;
-                const variantRegex = /[^¥\n]+?¥\s*[\d.,]+/g;
-                const matches = dirtyPriceLine.match(variantRegex) || [];
                 
-                let minPrice = Infinity;
-                let processedVariants = [];
-
-                if (matches.length > 0) {
-                    matches.forEach(item => {
-                        processedVariants.push(item.trim());
-                        const pMatch = item.match(/¥\s*([\d.,]+)/);
-                        if (pMatch) {
-                            const num = parseFloat(pMatch[1].replace(/,/g, '.'));
-                            if (!isNaN(num) && num < minPrice) minPrice = num;
-                        }
-                    });
-                } else {
-                    const single = findMinPriceInString(dirtyPriceLine);
-                    if (single !== Infinity) minPrice = single;
-                    processedVariants.push(dirtyPriceLine);
+                // Tìm nội dung trong cặp ◤ ◥ trong toàn bộ khối text của sản phẩm
+                let bracketContent = "";
+                const bracketMatch = part.match(/◤([\s\S]*?)◥/);
+                if (bracketMatch) {
+                    bracketContent = bracketMatch[1].trim();
                 }
 
-                // --- LOGIC ƯU TIÊN GIÁ TỪ CỤM "价格" ---
-                // Điều kiện: Nếu chỉ có 1 sản phẩm VÀ (trong ◤◥ chỉ có đúng 1 giá ¥)
-                if (parts.length <= 2 && symbolCount === 1 && globalPriceNote) {
-                    const minInGlobal = findMinPriceInString(globalPriceNote);
-                    if (minInGlobal !== Infinity) {
-                        minPrice = minInGlobal; // Ghi đè bằng giá rẻ nhất tìm thấy ở cụm 价格
-                    }
+                // Đếm số lượng giá tiền (dấu ¥) có trong ngoặc ◤ ◥
+                const pricesInBracket = bracketContent.match(/¥\s*([\d.,]+)/g) || [];
+                const symbolCount = pricesInBracket.length;
+                
+                let finalPrice = Infinity;
+
+                // Tính giá thấp nhất hiện có bên trong ngoặc
+                pricesInBracket.forEach(pStr => {
+                    const num = parseFloat(pStr.replace('¥', '').replace(/,/g, '.').trim());
+                    if (!isNaN(num) && num < finalPrice) finalPrice = num;
+                });
+
+                // --- LOGIC ƯU TIÊN THEO YÊU CẦU ---
+                // Nếu chỉ có 1 giá trong ◤ ◥, ưu tiên lấy giá sàn từ cụm "价格"
+                if (symbolCount === 1 && minPriceInGlobal !== Infinity) {
+                    finalPrice = minPriceInGlobal;
+                }
+
+                // Nếu sau tất cả vẫn không tìm thấy giá, dùng defaultPrice
+                if (finalPrice === Infinity) {
+                    finalPrice = inputs.defaultPrice || 0;
                 }
 
                 products.push({
                     image: Utils.cleanImageUrl(imgLink),
                     name: mainName,
-                    price: minPrice === Infinity ? (inputs.defaultPrice || 0) : minPrice,
-                    note: (globalPriceNote ? "Bảng giá gốc:\n" + globalPriceNote + "\n---\n" : "") + processedVariants.join('\n')
+                    price: finalPrice,
+                    note: (globalPriceNote ? globalPriceNote + "\n---\n" : "") + (bracketContent || "Không có thông tin phiên bản")
                 });
             }
         });
