@@ -71,10 +71,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     document.getElementById('rawInput').value = text;
                     autoDetectBtn.click();
                 }
-            } catch (err) { 
-                UIManager.showToast("⚠️ Lỗi truy cập Clipboard"); 
-                console.error("Clipboard read error:", err);
-            }
+            } catch (err) { UIManager.showToast("⚠️ Lỗi truy cập Clipboard"); }
         });
     }
 
@@ -110,44 +107,54 @@ function detectModeLogic(text) {
 
     // Ưu tiên 2: Mode 3 (Có ngoặc ◤ ◥ hoặc nhiều dấu ¥ ở dòng giá)
     const blocks = text.split(/(?=https?:\/\/)/);
-    // ... (phần còn lại của hàm detectModeLogic giữ nguyên như cũ của bạn)
-    // Giả sử phần còn lại không thay đổi, bạn có thể giữ nguyên code cũ từ đây trở đi
-    // Nếu bạn có phần code bị cắt trước đó, hãy nối lại phần còn thiếu vào đây
-
-    // Ví dụ placeholder cho phần còn lại (bạn thay bằng code thật nếu khác):
-    if (text.includes('◤') && text.includes('◥')) return 'mode3';
-    if (text.split('¥').length > 3) return 'mode2';
-    return 'mode1'; // mặc định
-}
-
-function handleMainProcess() {
-    const rawInput = document.getElementById('rawInput').value.trim();
-    if (!rawInput) {
-        UIManager.showToast("❌ Dữ liệu trống!");
-        return;
+    for (const b of blocks) {
+        const bl = b.trim().split('\n').filter(l => l !== "");
+        if (bl.length >= 3) {
+            const priceLine = bl[2];
+            if (priceLine.includes('◤') || (priceLine.match(/¥/g) || []).length > 1) return 'mode3';
+        }
     }
 
-    let { products, globalUrl } = analyzeData(rawInput);
-    if (products.length === 0) {
-        UIManager.showToast("❌ Không tìm thấy sản phẩm!");
-        return;
-    }
+    // Ưu tiên 3: Mode 2
+    const jgMatch = text.match(/价格:?\s*([\s\S]*?)(?=\n\s*http|$)/);
+    if (jgMatch && jgMatch[1].trim().split('\n').filter(l => l !== "").length >= 2) return 'mode2';
 
-    const uiInputs = UIManager.getInputs();
-    const processedProducts = allModes[currentModeId].execute(rawInput, uiInputs);
-    renderResults(processedProducts, globalUrl);
+    return 'mode1';
 }
 
+async function handleMainProcess() {
+    const rawInput = document.getElementById('rawInput');
+    let { products, globalUrl } = analyzeData(rawInput.value);
+    if (products.length === 0) return UIManager.showToast("❌ Không tìm thấy SP!");
+
+    let fixedProducts = products.some(p => p.isMissing) ? await showFixModal(products) : products;
+    if (!fixedProducts) return;
+
+    const updatedText = rebuildRawData(rawInput.value, fixedProducts);
+    rawInput.value = updatedText;
+    
+    const processed = allModes[currentModeId].execute(updatedText, UIManager.getInputs());
+    renderResults(processed, globalUrl);
+}
+
+/**
+ * XUẤT KẾT QUẢ & AUTO COPY (Giữ nguyên logic của bạn)
+ */
 function renderResults(products, globalUrl) {
     const uiInputs = UIManager.getInputs();
     const startNum = parseInt(uiInputs.startNumber) || 49;
     
     const outputRows = products.map((p, idx) => {
         const row = startNum + idx;
-        return [
+/*         return [
             p.name, `=IMAGE(D${row})`, p.image, "",
             globalUrl, "", "", "", 
-            Utils.formatPriceVN(p.price), "","","","","","","", p.note || ""
+            Utils.formatPriceVN(p.price), p.note || ""
+        ].map(Utils.escapeTabular).join('\t'); */
+		        return [
+            p.name, `=IMAGE(D${row})`, p.image, "",
+            globalUrl, "", "", "", 
+            Utils.formatPriceVN(p.price), "","","","","","","",p.note || ""
         ].map(Utils.escapeTabular).join('\t');
     });
 
@@ -155,65 +162,21 @@ function renderResults(products, globalUrl) {
     document.getElementById('outputBox').value = finalResult;
 
     if (finalResult) {
-        handleCopy();  // Gọi hàm copy đã sửa (có fallback)
-        
-        // Tự động tăng số dòng
-        const startNumInput = document.getElementById('startNumber');
-        if (startNumInput) startNumInput.value = startNum + products.length;
+        navigator.clipboard.writeText(finalResult).then(() => {
+            UIManager.showToast(`✅ Đã xuất & Copy ${products.length} dòng!`);
+        });
     }
+
+    // Tự động tăng số dòng
+    const startNumInput = document.getElementById('startNumber');
+    if (startNumInput) startNumInput.value = startNum + products.length;
 }
 
-/**
- * Hàm copy đã sửa: ưu tiên Clipboard API, fallback execCommand
- */
 async function handleCopy() {
-    const val = document.getElementById('outputBox').value?.trim();
-    if (!val) {
-        UIManager.showToast("⚠️ Không có dữ liệu để copy");
-        return;
-    }
-
-    // Cách 1: Thử Clipboard API (nếu tab focused)
-    if (navigator.clipboard) {
-        try {
-            await navigator.clipboard.writeText(val);
-            UIManager.showToast(`✅ Đã copy ${val.split('\n').length} dòng!`);
-            console.log("Copied via Clipboard API");
-            return;
-        } catch (err) {
-            console.warn("Clipboard API thất bại:", err);
-            // Tiếp tục fallback
-        }
-    }
-
-    // Cách 2: Fallback execCommand (làm việc khi tab không focus)
-    const textarea = document.createElement('textarea');
-    textarea.value = val;
-    textarea.setAttribute('readonly', '');
-    textarea.style.position = 'absolute';
-    textarea.style.left = '-9999px';
-    textarea.style.top = '0';
-    textarea.style.opacity = '0';
-    document.body.appendChild(textarea);
-
-    textarea.select();
-    textarea.setSelectionRange(0, 99999);
-
-    let successful = false;
-    try {
-        successful = document.execCommand('copy');
-    } catch (err) {
-        console.error('execCommand copy lỗi:', err);
-    }
-
-    document.body.removeChild(textarea);
-
-    if (successful) {
-        UIManager.showToast(`✅ Đã copy ${val.split('\n').length} dòng (fallback)!`);
-        console.log("Copied via execCommand fallback");
-    } else {
-        UIManager.showToast("❌ Copy thất bại - hãy focus tab này rồi thử lại");
-        console.error("Không copy được bằng cả hai cách");
+    const val = document.getElementById('outputBox').value;
+    if (val) {
+        await navigator.clipboard.writeText(val);
+        UIManager.showToast("✅ Đã copy!");
     }
 }
 
